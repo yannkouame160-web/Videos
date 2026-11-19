@@ -7,12 +7,16 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
 	"keyavi-videos/internal/apikey"
 	"keyavi-videos/internal/store"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const tailleMaxCorps = 1 << 20 // 1 Mo
@@ -20,12 +24,15 @@ const tailleMaxCorps = 1 << 20 // 1 Mo
 // ApplicationStore est la partie du store utilisée par l'API.
 type ApplicationStore interface {
 	CreateApplication(ctx context.Context, a store.NewApplication) (store.Application, error)
+	GetApplicationByKeyHash(ctx context.Context, empreinte string) (store.Application, error)
+	SetApplicationActive(ctx context.Context, id string, active bool) error
 }
 
 // Dependencies regroupe les dépendances et les valeurs par défaut du routeur.
 type Dependencies struct {
 	Store                    ApplicationStore
 	InvitationCode           string
+	AdminCode                string
 	DefaultStorageQuotaBytes int64
 	DefaultMaxVideos         int
 	DefaultRequestsPerMinute int
@@ -45,6 +52,19 @@ func NewRouter(deps Dependencies) http.Handler {
 	mux.HandleFunc("POST /v1/applications", func(w http.ResponseWriter, r *http.Request) {
 		creerApplication(w, r, deps)
 	})
+
+	// La route de lecture de l'application est protégée par le portier.
+	mux.HandleFunc("GET /v1/application", portier(deps.Store)(applicationDepuisPortier))
+
+	// Routes d'administration : activation et désactivation.
+	mux.HandleFunc("POST /v1/admin/applications/{id}/desactiver",
+		func(w http.ResponseWriter, r *http.Request) {
+			adminDefinirActivation(w, r, deps, false)
+		})
+	mux.HandleFunc("POST /v1/admin/applications/{id}/activer",
+		func(w http.ResponseWriter, r *http.Request) {
+			adminDefinirActivation(w, r, deps, true)
+		})
 
 	return mux
 }
@@ -83,6 +103,8 @@ func creerApplication(w http.ResponseWriter, r *http.Request, deps Dependencies)
 	}
 
 	if deps.Store == nil {
+		err := errors.New("store non configuré")
+		journaliserErreur("POST /v1/applications", err)
 		ecrireErreur(w, http.StatusInternalServerError, "erreur_interne", "erreur interne")
 		return
 	}
@@ -109,6 +131,7 @@ func creerApplication(w http.ResponseWriter, r *http.Request, deps Dependencies)
 	// La clé en clair ne quitte jamais cette fonction : seul le hash est transmis au store.
 	cle, empreinte, err := apikey.Generate()
 	if err != nil {
+		journaliserErreur("POST /v1/applications", err)
 		ecrireErreur(w, http.StatusInternalServerError, "erreur_interne", "erreur interne")
 		return
 	}
@@ -125,7 +148,8 @@ func creerApplication(w http.ResponseWriter, r *http.Request, deps Dependencies)
 			ecrireErreur(w, http.StatusConflict, "nom_deja_utilise", "ce nom est déjà utilisé")
 			return
 		}
-		// Le détail technique n'est ni renvoyé au client, ni écrit dans les logs.
+		// Le détail technique n'est pas renvoyé au client ; il est seulement journalisé.
+		journaliserErreur("POST /v1/applications", err)
 		ecrireErreur(w, http.StatusInternalServerError, "erreur_interne", "erreur interne")
 		return
 	}
@@ -138,4 +162,81 @@ func creerApplication(w http.ResponseWriter, r *http.Request, deps Dependencies)
 		"nom":            app.Nom,
 		"cle":            cle,
 	})
+}
+
+// regexpUUID valide un identifiant d'application au format UUID canonique
+// (8-4-4-4-12 hexadécimaux séparés par des tirets).
+var regexpUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// estUUIDValide indique si id est au format attendu pour un identifiant d'application.
+func estUUIDValide(id string) bool {
+	return regexpUUID.MatchString(id)
+}
+
+// routeActivation renvoie le nom court de la route d'activation pour la journalisation.
+func routeActivation(active bool) string {
+	if active {
+		return "POST /v1/admin/applications/{id}/activer"
+	}
+	return "POST /v1/admin/applications/{id}/desactiver"
+}
+
+// adminDefinirActivation active ou désactive une application via les routes d'administration.
+func adminDefinirActivation(w http.ResponseWriter, r *http.Request, deps Dependencies, active bool) {
+	route := routeActivation(active)
+
+	// Sans code d'administration configuré, l'opération est désactivée.
+	if deps.AdminCode == "" {
+		ecrireErreur(w, http.StatusServiceUnavailable, "administration_desactivee",
+			"administration désactivée")
+		return
+	}
+
+	// On ne distingue pas un en-tête absent d'un mauvais code d'administration.
+	code := r.Header.Get("X-Admin-Code")
+	if code == "" || !codeValide(code, deps.AdminCode) {
+		ecrireErreur(w, http.StatusUnauthorized, "code_admin_invalide",
+			"code d'administration invalide")
+		return
+	}
+
+	id := r.PathValue("id")
+	if !estUUIDValide(id) {
+		ecrireErreur(w, http.StatusBadRequest, "identifiant_invalide", "identifiant invalide")
+		return
+	}
+
+	if deps.Store == nil {
+		journaliserErreur(route, errors.New("store non configuré"))
+		ecrireErreur(w, http.StatusInternalServerError, "erreur_interne", "erreur interne")
+		return
+	}
+
+	if err := deps.Store.SetApplicationActive(r.Context(), id, active); err != nil {
+		if errors.Is(err, store.ErrApplicationIntrouvable) {
+			ecrireErreur(w, http.StatusNotFound, "application_introuvable", "application introuvable")
+			return
+		}
+		journaliserErreur(route, err)
+		ecrireErreur(w, http.StatusInternalServerError, "erreur_interne", "erreur interne")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"id_application": id,
+		"est_active":     active,
+	})
+}
+
+// journaliserErreur journalise une erreur technique sans exposer de secret : pour une
+// erreur PostgreSQL, seuls le code et le message sont conservés, jamais le Detail.
+func journaliserErreur(route string, err error) {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		log.Printf("erreur interne sur %s : code %s — %s", route, pgErr.Code, pgErr.Message)
+		return
+	}
+	log.Printf("erreur interne sur %s : %v", route, err)
 }

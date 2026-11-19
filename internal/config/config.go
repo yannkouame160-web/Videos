@@ -1,9 +1,11 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
+	"unicode/utf8"
 )
 
 // Config contient les paramètres de l'application lus depuis l'environnement.
@@ -47,11 +49,26 @@ func parseEntierPositif(nom string, defaut int64) (int64, error) {
 	return valeur, nil
 }
 
-// Load lit les variables d'environnement, valide les quotas et renvoie la configuration.
+// Load lit les variables d'environnement, valide les codes et les quotas et renvoie la configuration.
 func Load() (Config, error) {
 	port := os.Getenv("HTTP_PORT")
 	if port == "" {
 		port = "8080"
+	}
+
+	invitation := os.Getenv("INVITATION_CODE")
+	admin := os.Getenv("ADMIN_CODE")
+
+	// Les codes sont optionnels, mais s'ils sont définis ils doivent être
+	// d'au moins 16 caractères, et l'un ne doit jamais être égal à l'autre.
+	if utf8.RuneCountInString(invitation) != 0 && utf8.RuneCountInString(invitation) < 16 {
+		return Config{}, errors.New("INVITATION_CODE doit contenir au moins 16 caractères")
+	}
+	if utf8.RuneCountInString(admin) != 0 && utf8.RuneCountInString(admin) < 16 {
+		return Config{}, errors.New("ADMIN_CODE doit contenir au moins 16 caractères")
+	}
+	if invitation != "" && admin != "" && invitation == admin {
+		return Config{}, errors.New("INVITATION_CODE et ADMIN_CODE doivent être différents")
 	}
 
 	stockage, err := parseEntierPositif("DEFAULT_QUOTA_STORAGE_BYTES", defautStockageOctets)
@@ -70,8 +87,8 @@ func Load() (Config, error) {
 	return Config{
 		HTTPPort:                 port,
 		DatabaseURL:              os.Getenv("DATABASE_URL"),
-		InvitationCode:           os.Getenv("INVITATION_CODE"),
-		AdminCode:                os.Getenv("ADMIN_CODE"),
+		InvitationCode:           invitation,
+		AdminCode:                admin,
 		DefaultStorageQuotaBytes: stockage,
 		DefaultMaxVideos:         int(videos),
 		DefaultRequestsPerMinute: int(requetes),
