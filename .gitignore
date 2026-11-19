@@ -1,5 +1,7 @@
 # Secrets : ne jamais les mettre dans Git
 .env
+.env.*
+!.env.example
 
 # Programmes générés par Go
 /bin/
