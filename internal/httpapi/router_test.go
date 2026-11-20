@@ -40,6 +40,52 @@ type fauxStore struct {
 	idActiveRecu   string // dernier id reçu par SetApplicationActive
 	activeRecu     bool   // dernier état reçu par SetApplicationActive
 	callsActive    int
+
+	// Champs pour les tests des utilisateurs externes.
+	user                store.Utilisateur // utilisateur renvoyé par les méthodes de store.UtilisateurStore
+	cree                bool              // valeur renvoyée par ObtenirOuCreerUtilisateur
+	errUser             error             // erreur renvoyée par les méthodes de store.UtilisateurStore
+	idAppUserRecu       string            // dernier id d'application reçu par les méthodes utilisateur
+	idExterneUserRecu   string            // dernier id externe reçu par les méthodes utilisateur
+	roleRecu            string            // dernier rôle reçu par DefinirRole
+	supprimerVideosRecu bool              // dernier état de suppression reçu par SupprimerUtilisateur
+}
+
+func (f *fauxStore) GetUtilisateur(_ context.Context, idApp, idExterne string) (store.Utilisateur, error) {
+	f.idAppUserRecu = idApp
+	f.idExterneUserRecu = idExterne
+	if f.errUser != nil {
+		return store.Utilisateur{}, f.errUser
+	}
+	return f.user, nil
+}
+
+func (f *fauxStore) ObtenirOuCreerUtilisateur(_ context.Context, idApp, idExterne string) (store.Utilisateur, bool, error) {
+	f.idAppUserRecu = idApp
+	f.idExterneUserRecu = idExterne
+	if f.errUser != nil {
+		return store.Utilisateur{}, false, f.errUser
+	}
+	return f.user, f.cree, nil
+}
+
+func (f *fauxStore) DefinirRole(_ context.Context, idApp, idExterne, role string) (store.Utilisateur, error) {
+	f.idAppUserRecu = idApp
+	f.idExterneUserRecu = idExterne
+	f.roleRecu = role
+	if f.errUser != nil {
+		return store.Utilisateur{}, f.errUser
+	}
+	u := f.user
+	u.Role = role
+	return u, nil
+}
+
+func (f *fauxStore) SupprimerUtilisateur(_ context.Context, idApp, idExterne string, supprimerVideos bool) error {
+	f.idAppUserRecu = idApp
+	f.idExterneUserRecu = idExterne
+	f.supprimerVideosRecu = supprimerVideos
+	return f.errUser
 }
 
 func (f *fauxStore) CreateApplication(_ context.Context, a store.NewApplication) (store.Application, error) {

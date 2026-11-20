@@ -31,6 +31,7 @@ type ApplicationStore interface {
 // Dependencies regroupe les dépendances et les valeurs par défaut du routeur.
 type Dependencies struct {
 	Store                    ApplicationStore
+	Utilisateurs             UtilisateurStore
 	InvitationCode           string
 	AdminCode                string
 	DefaultStorageQuotaBytes int64
@@ -65,6 +66,17 @@ func NewRouter(deps Dependencies) http.Handler {
 		func(w http.ResponseWriter, r *http.Request) {
 			adminDefinirActivation(w, r, deps, true)
 		})
+
+	// Routes des utilisateurs externes : protégées par le portier.
+	mux.HandleFunc("GET /v1/utilisateurs/{id_externe}", portier(deps.Store)(func(w http.ResponseWriter, r *http.Request) {
+		getUtilisateur(w, r, deps)
+	}))
+	mux.HandleFunc("PUT /v1/utilisateurs/{id_externe}/role", portier(deps.Store)(func(w http.ResponseWriter, r *http.Request) {
+		putRoleUtilisateur(w, r, deps)
+	}))
+	mux.HandleFunc("DELETE /v1/utilisateurs/{id_externe}", portier(deps.Store)(func(w http.ResponseWriter, r *http.Request) {
+		deleteUtilisateur(w, r, deps)
+	}))
 
 	return mux
 }

@@ -63,6 +63,123 @@ func TestCreationApplicationAvecVraieBase(t *testing.T) {
 	}
 }
 
+func TestScenarioUtilisateursAvecVraieBase(t *testing.T) {
+	pool := testdb.Open(t)
+	ctx := context.Background()
+
+	deps := Dependencies{
+		Store:                    store.NewStore(pool),
+		Utilisateurs:             store.NewStore(pool),
+		InvitationCode:           "code-invitation-test",
+		AdminCode:                "code-admin-test",
+		DefaultStorageQuotaBytes: 1234,
+		DefaultMaxVideos:         56,
+		DefaultRequestsPerMinute: 78,
+	}
+	router := NewRouter(deps)
+
+	// Crée les applications A et B.
+	rec := postApplication(t, router, "code-invitation-test", `{"nom":"App A"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("création de A: code HTTP: attendu 201, obtenu %d (%s)", rec.Code, rec.Body.String())
+	}
+	var repA struct {
+		ID  string `json:"id_application"`
+		Cle string `json:"cle"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &repA); err != nil {
+		t.Fatalf("réponse JSON invalide: %v", err)
+	}
+
+	rec = postApplication(t, router, "code-invitation-test", `{"nom":"App B"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("création de B: code HTTP: attendu 201, obtenu %d (%s)", rec.Code, rec.Body.String())
+	}
+	var repB struct {
+		ID  string `json:"id_application"`
+		Cle string `json:"cle"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &repB); err != nil {
+		t.Fatalf("réponse JSON invalide: %v", err)
+	}
+
+	// (a) avec la clé de A : GET /v1/utilisateurs/u1 : 201 rôle "lecteur".
+	rec = getUtilisateurAvec(t, router, repA.Cle, "u1")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("(a) code HTTP: attendu 201, obtenu %d (%s)", rec.Code, rec.Body.String())
+	}
+	if id, role := reponseUtilisateur(t, rec); id != "u1" || role != store.RoleLecteur {
+		t.Errorf("(a) utilisateur: attendu (%q, %q), obtenu (%q, %q)", "u1", store.RoleLecteur, id, role)
+	}
+
+	// (b) PUT .../u1/role {"role":"administrateur"} : 200.
+	rec = putRoleAvec(t, router, repA.Cle, "u1", `{"role":"administrateur"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("(b) code HTTP: attendu 200, obtenu %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	// (c) GET : 200 avec rôle "administrateur".
+	rec = getUtilisateurAvec(t, router, repA.Cle, "u1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("(c) code HTTP: attendu 200, obtenu %d", rec.Code)
+	}
+	if id, role := reponseUtilisateur(t, rec); id != "u1" || role != store.RoleAdministrateur {
+		t.Errorf("(c) utilisateur: attendu (%q, %q), obtenu (%q, %q)", "u1", store.RoleAdministrateur, id, role)
+	}
+
+	// (d) avec la clé de B : 201 rôle "lecteur" (utilisateur distinct, rôle non contaminé).
+	rec = getUtilisateurAvec(t, router, repB.Cle, "u1")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("(d) code HTTP: attendu 201, obtenu %d (%s)", rec.Code, rec.Body.String())
+	}
+	if id, role := reponseUtilisateur(t, rec); id != "u1" || role != store.RoleLecteur {
+		t.Errorf("(d) utilisateur: attendu (%q, %q), obtenu (%q, %q)", "u1", store.RoleLecteur, id, role)
+	}
+
+	// (e) DELETE /v1/utilisateurs/u1 avec la clé de A : 204.
+	rec = deleteAvec(t, router, repA.Cle, "u1", "")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("(e) code HTTP: attendu 204, obtenu %d", rec.Code)
+	}
+
+	// (f) GET avec la clé de A : 201 (recréé).
+	rec = getUtilisateurAvec(t, router, repA.Cle, "u1")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("(f) code HTTP: attendu 201, obtenu %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	// (g) GET avec la clé de B : 200, toujours rôle "lecteur".
+	rec = getUtilisateurAvec(t, router, repB.Cle, "u1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("(g) code HTTP: attendu 200, obtenu %d", rec.Code)
+	}
+	if id, role := reponseUtilisateur(t, rec); id != "u1" || role != store.RoleLecteur {
+		t.Errorf("(g) utilisateur: attendu (%q, %q), obtenu (%q, %q)", "u1", store.RoleLecteur, id, role)
+	}
+
+	// Après mise à jour directe en SQL de creation_auto_utilisateur = false pour A :
+	if _, err := pool.Exec(ctx, `UPDATE application SET creation_auto_utilisateur = false WHERE id_application = $1::uuid`, repA.ID); err != nil {
+		t.Fatalf("mise à jour creation_auto_utilisateur: %v", err)
+	}
+	rec = getUtilisateurAvec(t, router, repA.Cle, "utilisateur-inconnu")
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("code HTTP: attendu 404, obtenu %d (%s)", rec.Code, rec.Body.String())
+	}
+	if code := codeErreur(t, rec); code != "utilisateur_introuvable" {
+		t.Errorf("code d'erreur: attendu utilisateur_introuvable, obtenu %q", code)
+	}
+
+	// Application A désactivée par la route d'administration : GET avec sa clé : 403.
+	rec = postAdmin(t, router, repA.ID, "desactiver", "code-admin-test")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("désactivation de A: code HTTP: attendu 200, obtenu %d", rec.Code)
+	}
+	rec = getUtilisateurAvec(t, router, repA.Cle, "u1")
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("code HTTP: attendu 403, obtenu %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
 func TestScenarioCompletVraieBase(t *testing.T) {
 	pool := testdb.Open(t)
 

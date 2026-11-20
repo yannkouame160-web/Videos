@@ -36,8 +36,10 @@ func main() {
 	}
 	defer pool.Close()
 
+	st := store.NewStore(pool)
 	deps := httpapi.Dependencies{
-		Store:                    store.NewStore(pool),
+		Store:                    st,
+		Utilisateurs:             st,
 		InvitationCode:           cfg.InvitationCode,
 		AdminCode:                cfg.AdminCode,
 		DefaultStorageQuotaBytes: cfg.DefaultStorageQuotaBytes,
