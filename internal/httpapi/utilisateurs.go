@@ -18,10 +18,13 @@ type UtilisateurStore interface {
 	SupprimerUtilisateur(ctx context.Context, idApp, idExterne string, supprimerVideos bool) error
 }
 
-// estIdentifiantExterneValide indique si idExterne est non vide, d'au plus 128
-// caractères (compte les runes) et sans caractère de contrôle.
+// estIdentifiantExterneValide indique si idExterne est non vide, encodé en UTF-8 valide,
+// d'au plus 128 caractères (compte les runes) et sans caractère de contrôle.
 func estIdentifiantExterneValide(idExterne string) bool {
 	if idExterne == "" {
+		return false
+	}
+	if !utf8.ValidString(idExterne) {
 		return false
 	}
 	if utf8.RuneCountInString(idExterne) > 128 {

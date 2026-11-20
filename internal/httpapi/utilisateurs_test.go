@@ -346,3 +346,19 @@ var _ ApplicationStore = (*fauxStore)(nil)
 
 // Interface utilisée pour vérifier que Store (magasin réel) implémente UtilisateurStore.
 var _ UtilisateurStore = (*store.Store)(nil)
+
+func TestUtilisateurIdentifiantUTF8Invalide(t *testing.T) {
+	f := &fauxStore{byKey: store.Application{ID: "app-1", EstActive: true}}
+	router := NewRouter(depsAvecUtilisateurs(f))
+
+	rec := getUtilisateurAvec(t, router, cleTester, "\xff")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code HTTP: attendu 400, obtenu %d", rec.Code)
+	}
+	if code := codeErreur(t, rec); code != "identifiant_invalide" {
+		t.Errorf("code d'erreur: attendu identifiant_invalide, obtenu %q", code)
+	}
+	if f.idAppUserRecu != "" {
+		t.Error("le store utilisateur ne doit pas etre appele")
+	}
+}
